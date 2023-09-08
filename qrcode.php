@@ -13,8 +13,54 @@ defined( 'ABSPATH' ) || exit;
 
 include 'phpqrcode/qrlib.php';
 
-
 register_activation_hook(__FILE__, 'user_qrcode_shortcode');
+
+
+
+// Hook to run the function when the plugin is activated
+function activate_wallet_recharge_plugin() {
+    create_wallet_recharge_product();
+    user_qrcode_shortcode();
+}
+register_activation_hook(__FILE__, 'activate_wallet_recharge_plugin');
+
+
+// Function to create a wallet recharge product programmatically
+function create_wallet_recharge_product() {
+    // Check if WooCommerce is active
+    if (!class_exists('WooCommerce')) {
+        return;
+    }
+
+    // Check if the product already exists by its title
+    $product_title = 'Wallet Recharge'; // Customize the product title as needed
+    $product_id = wc_get_product_id_by_sku('wallet-recharge'); // Customize the SKU as needed
+
+    if (!$product_id) {
+        // Load WooCommerce functions
+        include_once(WC()->plugin_path() . '/includes/admin/wc-admin-functions.php');
+
+        // Create the product
+        $product = new WC_Product();
+
+        $product->set_name($product_title);
+        $product->set_status('draft'); 
+        $product->set_regular_price(100.00); // Customize the recharge amount as needed
+        $product->set_sku('wallet-recharge'); // Customize the SKU as needed
+        $product->set_virtual(true); // Set as 'true' for a virtual product
+        // $product->set_downloadable(true); // Set as 'true' for a downloadable product
+
+        // Add a download file (optional for downloadable products)
+        // $download_file_url = 'https://example.com/download/wallet-recharge-file.zip'; // Customize the download file URL as needed
+        // $product->set_downloads(array(array(
+        //     'name' => $product_title,
+        //     'file' => $download_file_url,
+        // )));
+
+        $product->save();
+        update_option('wallet_recharge_sku', 'wallet-recharge');
+    }
+}
 
 
 // Shortcode to display QR codes
@@ -154,15 +200,30 @@ function qr_code_generate($id){
 // require_once( plugin_dir_path( __FILE__ ) . 'vendor/autoload.php' );
 
 function custom_account_menu_items($items) {
-    // Key you want to check
-    $desired_key = 'wallet';
+
+    if (!class_exists('WooCommerce')) {
+        return false;
+    }
+
+    $desired_key = "wallet";
     // Check if the desired key exists in the array
-    if (is_array($items) && array_key_exists($desired_key, $items)) {
-        // The key exists, do something
-        // echo $value = $items[$desired_key];
-        // ... your code here ...
-    } else {
-        $items['wallet'] = __('Wallet', 'your-textdomain');
+    if (is_array($items) && !array_key_exists($desired_key, $items)) {
+
+        $new_items = array(
+            'wallet' => 'Wallet', // Label for the custom item
+        );
+    
+        // Merge the custom menu items after the "Dashboard" menu item
+        $position = array_search('dashboard', array_keys($items));
+        if ($position !== false) {
+            $items = array_slice($items, 0, $position + 1, true) +
+                $new_items +
+                array_slice($items, $position + 1, null, true);
+        } else {
+            // If "Dashboard" is not found, simply add the custom item at the end
+            $items = $items + $new_items;
+        }
+
     }
     return $items;
 }
@@ -173,6 +234,7 @@ add_filter('woocommerce_account_menu_items', 'custom_account_menu_items');
 add_action( 'init', 'misha_add_endpoint' );
 function misha_add_endpoint() {
     add_rewrite_endpoint( 'wallet', EP_PAGES );
+    flush_rewrite_rules();
 }
 
 // content for the new page in My Account, woocommerce_account_{ENDPOINT NAME}_endpoint
@@ -186,6 +248,7 @@ function misha_my_account_endpoint_content() {
 
         <div class="custom-my-account">
             <p>Welcome to your wallet <strong><?php echo esc_html($user->display_name); ?>!</strong></p>
+            
             <div class="wallet">
                 <table class="table table-border">
                     <thead>
@@ -197,7 +260,11 @@ function misha_my_account_endpoint_content() {
                     <tbody>
                         <tr>
                             <td>Qr Code</td>
-                            <td><p><img src="<?php echo $user_qr_url; ?>" class="img" style="width:100%; max-width:120px;"/></p><button type="button" class="button">Regenerate Wallet QR Code</button></td>
+                            <td>
+                                <p><img src="<?php echo $user_qr_url; ?>" class="img" style="width:100%; max-width:120px;"/></p>
+                                <button type="button" class="button">Regenerate Wallet QR Code</button>
+                                <button type="button" class="button" id="your-custom-button-id">Recharge Wallet</button>
+                            </td>
                         </tr>
                         <tr>
                             <td>Wallet Balance</td>
@@ -209,11 +276,19 @@ function misha_my_account_endpoint_content() {
 
             <form id="custom-account-form" method="post">
                 <h3>Transfer Wallet balance to Any User using user name</h3>
-                <?php display_form_errors(); ?>
+                
+                <?php 
+                    display_form_errors();
+                ?>
+
+                <?php 
+                    if (isset($_GET['success']) && $_GET['success'] === '1') {
+                        echo '<div class="woocommerce-message success">Your wallet balance has been successfully transfered.</div>';
+                    }
+                ?>
                 <div class="form-group mb-3">
                     <label for="username">Username</label>                
-                    <input type="text" class="form-control" id="username" name="username" placeholder="Enter Username">
-                    <span class="error"><?php echo isset($errors['username']) ? $errors['username'] : ''; ?></span>
+                    <input type="text" class="form-control" id="username" name="username" placeholder="Enter Username/Email">
                 </div>
                 <div class="form-group mb-3">
                     <label for="wallet_amt">Wallet Amount</label>                
@@ -231,19 +306,27 @@ function misha_my_account_endpoint_content() {
 }
 
 
-
-
-
 function custom_form_validation() {
     $errors = array();
 
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         $current_user_id = get_current_user_id();
+        $current_user_info = get_userdata($current_user_id);
+        $current_user_login = $current_user_info->user_login;
+        $current_user_email = $current_user_info->user_email;
+        
         $username = sanitize_text_field($_POST['username']);
         $amt_to_transfer = $_POST['wallet_amt'];
        
-        
+        if ($username === $current_user_login) {
+            $errors['username'] = "You can not transfer wallet balance to your account. " .$username;
+        }
+
+        if ($username === $current_user_email) {
+            $errors['username'] = "You can not transfer wallet balance to your account. " .$username;
+        }
+
         if (empty($username)) {
             $errors['username'] = "Username is required.";
         }
@@ -272,7 +355,7 @@ function custom_form_validation() {
         $user_id_to_tranfer_wallet_amount = $user->ID;
 
         
-        if (empty($errors)) {            
+        if (empty($errors)) {
             $current_user_wallet_amount = get_user_meta($current_user_id, 'user_qr_wallet', true);
             $deposit_user_wallet_amount = get_user_meta($user_id_to_tranfer_wallet_amount, 'user_qr_wallet', true);
            
@@ -280,20 +363,20 @@ function custom_form_validation() {
 
             update_user_meta($current_user_id, 'user_qr_wallet', $current_user_wallet_balance);
             update_user_meta($user_id_to_tranfer_wallet_amount, 'user_qr_wallet', $beneficial_user_wallet_balance);               
-
-            // session_start();
-            // $_SESSION['form_success'] = "Successfully transfer wallet amount to ". $user->user_login;
+            
+            $submission_success = true;
+            wp_redirect(add_query_arg('success', $submission_success, wc_get_account_endpoint_url('wallet')));
+            exit;   
 
         }else{
+           
             session_start();
             $_SESSION['form_errors'] = $errors;
+           
         }      
-        
-        
        
     }
 }
-
 
 add_action('init', 'custom_form_validation');
 
@@ -307,41 +390,40 @@ function display_form_errors() {
             echo '<p class="error" style="color:red;">' . $message . '</p>';
         }
         unset($_SESSION['form_errors']);
-    }else{
-        $success = $_SESSION['form_success'];
-        echo '<p class="error" style="color:green;">' . $success . '</p>';
     }
 }
 
 
 
-
 // Function to display user meta fields
 function custom_user_profile_fields($user) {
+    if(current_user_can('edit_user_metadata')){
     ?>
-    <h3><?php _e('QR User', 'text-domain'); ?></h3>
-    <table class="form-table">
-        <?php 
-            $nonce = wp_create_nonce('update_user_metadata');
-            echo '<input type="hidden" name="update_user_nonce" value="' . esc_attr($nonce) . '" />';
-        ?>
-        <tr>
-            <th><label for="user_qr_code"><?php _e('QR Code', 'text-domain'); ?></label></th>
-            <td>
-                <img class="img user_qr_url" src="<?php echo esc_attr(get_the_author_meta('user_qr_url', $user->ID)); ?>" style="width:100%; max-width:150px;"/>
-                <p class="description"><?php _e('Unique Qr Code.', 'text-domain'); ?></p>
-                <button type="button" class="button">Regenerate Wallet QR Code</button>
-            </td>
-        </tr>
-        <tr>
-            <th><label for="user_qr_wallet"><?php _e('Wallet Balance', 'text-domain'); ?></label></th>user_qr_wallet
-            <td>
-                <input type="number" name="user_qr_wallet" value="<?php echo esc_attr(get_the_author_meta('user_qr_wallet', $user->ID)); ?>" <?php echo $variable = (current_user_can('edit_user_metadata')) ? "" : "readonly"; ?>  />               
-                <p class="description"><?php _e('Wallet Balance.', 'text-domain'); ?></p>
-            </td>
-        </tr>
-    </table>
+        <h3><?php _e('QR User', 'text-domain'); ?></h3>
+        <table class="form-table">
+            <?php 
+                $nonce = wp_create_nonce('update_user_metadata');
+                echo '<input type="hidden" name="update_user_nonce" value="' . esc_attr($nonce) . '" />';
+            ?>
+            <tr>
+                <th><label for="user_qr_code"><?php _e('QR Code', 'text-domain'); ?></label></th>
+                <td>
+                    <img class="img user_qr_url" src="<?php echo esc_attr(get_the_author_meta('user_qr_url', $user->ID)); ?>" style="width:100%; max-width:150px;"/>
+                    <p class="description"><?php _e('Unique Qr Code.', 'text-domain'); ?></p>
+                    <button type="button" class="button">Regenerate Wallet QR Code</button>
+                    
+                </td>
+            </tr>
+            <tr>
+                <th><label for="user_qr_wallet"><?php _e('Wallet Balance', 'text-domain'); ?></label></th>user_qr_wallet
+                <td>
+                    <input type="number" name="user_qr_wallet" value="<?php echo esc_attr(get_the_author_meta('user_qr_wallet', $user->ID)); ?>" <?php echo $variable = (current_user_can('edit_user_metadata')) ? "" : "readonly"; ?>  />               
+                    <p class="description"><?php _e('Wallet Balance.', 'text-domain'); ?></p>
+                </td>
+            </tr>
+        </table>
     <?php
+    }
 }
 
 // Hook to display fields on user profile edit page
@@ -351,12 +433,13 @@ add_action('edit_user_profile', 'custom_user_profile_fields');
 function save_custom_user_field($user_id) {
 
     if (isset($_POST['update_user_nonce']) && wp_verify_nonce($_POST['update_user_nonce'], 'update_user_metadata') && current_user_can('edit_user_metadata') ) {
-       
+        
+
         $user_qr_wallet = (int)($_POST['user_qr_wallet']);    
         if (!empty($user_qr_wallet)) {
             update_user_meta($user_id, 'user_qr_wallet', $user_qr_wallet);
         }
-        if (is_int($user_qr_wallet) && $user_qr_wallet < 0) {
+        if (is_int($user_qr_wallet) && $user_qr_wallet <= 0) {
             update_user_meta($user_id, 'user_qr_wallet', 0);
         }
     }
@@ -396,3 +479,232 @@ function custom_user_column_content( $value, $column_name, $user_id ) {
     return $value;
 }
 add_action( 'manage_users_custom_column', 'custom_user_column_content', 10, 3 );
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function enqueue_jquery() {
+    wp_enqueue_script('jquery');
+}
+add_action('wp_enqueue_scripts', 'enqueue_jquery');
+
+
+function enqueue_custom_scripts() {
+    // Enqueue your custom JavaScript file    
+    wp_enqueue_script( 'wallet-script', plugin_dir_url( __FILE__ ) . 'assets/js/wallet.js', array('jquery'), time(), true);
+
+    // Pass the AJAX URL to the script
+    wp_localize_script('wallet-script', 'ajax_object', array('ajax_url' => admin_url('admin-ajax.php')));
+}
+add_action('wp_enqueue_scripts', 'enqueue_custom_scripts');
+
+
+
+// Add this code to your theme's functions.php or a custom plugin.
+add_action('wp_ajax_create_custom_order', 'create_custom_order');
+add_action('wp_ajax_nopriv_create_custom_order', 'create_custom_order');
+
+function create_custom_order() {
+    // Check if the user is logged in.
+    if (is_user_logged_in()) {
+        // Get the current user's ID.
+        $current_user_id = get_current_user_id();
+        $current_user = wp_get_current_user();
+        $billing_address = [
+            'first_name' => $current_user->first_name,
+            'last_name' => $current_user->last_name,
+            'email' => $current_user->user_email,
+            'phone' => $current_user->billing_phone,
+            'address_1' => $current_user->billing_address_1,
+            'address_2' => $current_user->billing_address_2,
+            'city' => $current_user->billing_city,
+            'state' => $current_user->billing_state,
+            'postcode' => $current_user->billing_postcode,
+            'country' => $current_user->billing_country,
+        ];
+
+        // User is logged in, create a new WooCommerce order and add the wallet recharge product.
+        $order = wc_create_order();
+        $product_id = wc_get_product_id_by_sku("wallet-recharge"); // Replace with the actual product ID for the wallet recharge product.
+        $quantity = 1; // Adjust the quantity as needed.
+        $order->add_product(wc_get_product($product_id), $quantity);
+
+        // Calculate totals and save the order.
+        $order->calculate_totals();
+        $order->save();
+
+        // Set billing details for the order.
+        $order->set_address($billing_address, 'billing');
+        // Associate the order with the current user.
+        update_post_meta($order->get_id(), '_customer_user', $current_user_id);
+
+        // Get the checkout URL for the new order.
+        $checkout_url = $order->get_checkout_payment_url();
+
+        // Return the checkout URL as JSON.
+        wp_send_json(['checkout_url' => $checkout_url]);
+    } else {
+        // User is not logged in, return an error message.
+        wp_send_json_error('User is not logged in.');
+    }
+}
+
+
+
+
+
+// Add this code to your theme's functions.php or a custom plugin.
+add_action('woocommerce_order_status_changed', 'check_payment_status_and_update_user_meta', 10, 4);
+function check_payment_status_and_update_user_meta($order_id, $old_status, $new_status, $order) {
+
+    // Check if the new order status is 'completed'.
+    if ($new_status === 'completed') {
+
+        // Replace 'YOUR_SKU' with the SKU you want to check for.
+        $sku_to_check = 'wallet-recharge';
+
+        // Initialize a flag to check if the SKU is found.
+        $sku_found = false;
+        $subtotal = 0;
+
+        // Loop through the order items to check if the SKU exists.
+        foreach ($order->get_items() as $item_id => $item) {
+            // Get the product object for the item.
+            $product = $item->get_product();
+
+            // Check if the SKU of the product matches the one you want to find.
+            if ($product && $product->get_sku() === $sku_to_check) {
+
+                $subtotal = $item->get_subtotal();
+            
+                // Get the quantity for the item.
+                $quantity = $item->get_quantity();
+
+                // Add the details to the results array.
+                $results[] = array(
+                    'product_name' => $product->get_name(),
+                    'subtotal' => $subtotal,
+                    'quantity' => $quantity,
+                );
+
+                $sku_found = true;
+                break; // Exit the loop when the SKU is found.
+            }
+        }
+
+        // If the SKU is found in the order, take action here.
+        if ($sku_found) {
+            // Perform actions like updating user meta or sending notifications.
+            // For example, you can update a user's meta data:
+            $user_id = $order->get_user_id();
+            if ($user_id) {
+                $user_wallet_balance = get_user_meta($user_id, 'user_qr_wallet', true);
+                $user_update_wallet = $user_wallet_balance + $subtotal;
+                update_user_meta($user_id, 'user_qr_wallet', $user_update_wallet);              
+            }
+
+            // Or send a notification:
+            // send_notification_to_admin('SKU found in order');
+        }
+    }
+    
+}
+
+
+
+
+
+
+
+
+
+// function check_payment_status_and_update_user_meta($order_id, $old_status, $new_status, $order) {
+    
+//     // Check if the new order status is 'completed'.
+//     if ($new_status === 'completed') {
+//         // Get the user ID associated with the order.
+//         $user_id = $order->get_user_id();
+
+//         // Check if a user is associated with the order.
+//         if ($user_id) {
+//             // Update user meta data as needed.
+//             update_user_meta($user_id, 'user_qr_wallet', 0);
+//         }
+//     }
+
+// }
+
+
+
+// add_action('woocommerce_payment_complete', 'update_user_meta_after_payment');
+
+// function update_user_meta_after_payment($order_id) {
+//     // Get the order object.
+//     $order = wc_get_order($order_id);
+
+//     // Check the payment status.
+//     if ($order->is_paid()) {
+//         $user_id = $order->get_user_id();
+//         // Payment is completed, update user meta data.
+//         update_user_meta($user_id, 'user_qr_wallet', 0);
+//         echo "<pre>";
+//         print_r($order);
+//         echo "</pre>";
+//         wp_die();
+//         exit();
+
+//         // $user_id = $order->get_user_id();
+//         // update_user_meta($user_id, 'payment_status', 'completed');
+//     }
+// }
